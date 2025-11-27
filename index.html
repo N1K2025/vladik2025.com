@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Chat — HTML One Page</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+    header { padding: 16px; border-bottom: 1px solid #1f2937; }
+    main { max-width: 800px; margin: 0 auto; padding: 16px; }
+    .row { display: flex; gap: 8px; margin-bottom: 12px; }
+    select, input, button, textarea { background: #111827; color: #e5e7eb; border: 1px solid #374151; border-radius: 8px; padding: 10px; }
+    select, input { flex: 1; }
+    textarea { width: 100%; min-height: 120px; resize: vertical; }
+    button { cursor: pointer; }
+    .chat { background: #0b1220; border: 1px solid #1f2937; border-radius: 10px; padding: 12px; min-height: 200px; }
+    .msg { margin-bottom: 10px; }
+    .msg .role { font-weight: 600; color: #93c5fd; }
+    .msg .text { white-space: pre-wrap; }
+    .footer { margin-top: 10px; color: #9ca3af; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Chat</h1>
+    <div class="row">
+      <select id="provider">
+        <option value="claude">Claude-4.5-Opus (Anthropic)</option>
+        <option value="vladik">vladik-ai</option>
+      </select>
+      <input id="system" type="text" placeholder="System prompt (опционально)" />
+    </div>
+  </header>
+
+  <main>
+    <div class="chat" id="chat"></div>
+    <div class="row">
+      <textarea id="userInput" placeholder="Напишите сообщение..."></textarea>
+    </div>
+    <div class="row">
+      <button id="sendBtn">Отправить</button>
+      <button id="clearBtn">Очистить</button>
+    </div>
+    <div class="footer">Ключи API хранятся на сервере. Клиент отправляет запросы на /api/chat.</div>
+  </main>
+
+  <script>
+    const chatEl = document.getElementById('chat');
+    const providerEl = document.getElementById('provider');
+    const systemEl = document.getElementById('system');
+    const inputEl = document.getElementById('userInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    const messages = [];
+
+    function render() {
+      chatEl.innerHTML = messages.map(m => `
+        <div class="msg">
+          <div class="role">${m.role}</div>
+          <div class="text">${escapeHtml(m.text)}</div>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, s => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[s]));
+    }
+
+    async function send() {
+      const userText = inputEl.value.trim();
+      if (!userText) return;
+      messages.push({ role: 'Вы', text: userText });
+      render();
+      inputEl.value = '';
+
+      const provider = providerEl.value;
+      const system = systemEl.value.trim();
+
+      const controller = new AbortController();
+
+      // Пустое сообщение ассистента для стрима
+      const responseMsg = { role: 'ИИ', text: '' };
+      messages.push(responseMsg);
+      render();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider,
+            system,
+            messages: messages
+              .filter(m => m.role === 'Вы' || m.role === 'ИИ')
+              .map(m => ({ role: m.role === 'Вы' ? 'user' : 'assistant', content: m.text }))
+          }),
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          responseMsg.text += `\n[Ошибка: ${errText}]`;
+          render();
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+
+          // Протокол: сервер шлет строки JSONL: {type:"delta",text:"..."} или {type:"done"}
+          const lines = chunk.split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const evt = JSON.parse(line);
+              if (evt.type === 'delta') {
+                responseMsg.text += evt.text;
+                render();
+              } else if (evt.type === 'done') {
+                render();
+              } else if (evt.type === 'error') {
+                responseMsg.text += `\n[Ошибка: ${evt.message}]`;
+                render();
+              }
+            } catch {
+              // Игнорируем нечитаемые куски
+            }
+          }
+        }
+      } catch (e) {
+        responseMsg.text += `\n[Сбой сети: ${e.message}]`;
+        render();
+      }
+    }
+
+    sendBtn.addEventListener('click', send);
+    clearBtn.addEventListener('click', () => { messages.length = 0; render(); });
+  </script>
+</body>
+</html>
